@@ -9,10 +9,16 @@ const _st = await import('../../../script.js').catch(() => ({}));
 const getRequestHeaders = _st.getRequestHeaders ?? window.getRequestHeaders ?? (() => ({}));
 
 const MODULE_NAME = 'Cleaning';
-const IMAGE_SIZE_CONCURRENCY = 12;
-const IMAGE_SCAN_CONCURRENCY = 4;
-const DELETE_CONCURRENCY = 8;
-const DATA_MAID_DELETE_CHUNK = 50;
+
+// Concurrency limits. Image scanning is nested: up to IMAGE_SCAN_CONCURRENCY
+// folders are processed in parallel, and within each folder up to
+// IMAGE_SIZE_CONCURRENCY size probes run at once. The effective peak of
+// simultaneous requests is therefore roughly the product of the two, so keep it
+// below typical browser per-host connection limits.
+const IMAGE_SCAN_CONCURRENCY = 4;   // folders scanned in parallel
+const IMAGE_SIZE_CONCURRENCY = 8;   // size probes per folder (~32 peak)
+const DELETE_CONCURRENCY = 8;       // parallel image delete requests
+const DATA_MAID_DELETE_CHUNK = 50;  // hashes per Data Maid delete request
 
 const state = {
     root: null,
@@ -215,19 +221,18 @@ async function postJson(url, body, options = {}) {
     return response.json();
 }
 
-async function resolveStaticSize(url) {
-    try {
-        const head = await apiRequestJson(url, { method: 'HEAD', omitContentType: true });
-        if (head.ok) {
-            const length = Number(head.headers.get('content-length'));
-            if (Number.isFinite(length) && length >= 0) {
-                return length;
-            }
-        }
-    } catch {
-        // ignore and fall back
-    }
+// Cache of resolved image sizes keyed by relative image path. Image files are
+// immutable once written (SillyTavern always creates new files), so a size that
+// was resolved once stays valid for the lifetime of the dialog. This avoids
+// re-issuing HEAD/range requests on rescans and before delete/download.
+const imageSizeCache = new Map();
 
+function invalidateImageSize(path) {
+    imageSizeCache.delete(path);
+}
+
+// Range-request fallback for servers that don't return content-length on HEAD.
+async function resolveSizeViaRange(url) {
     try {
         const ranged = await apiRequestJson(url, {
             method: 'GET',
@@ -252,6 +257,34 @@ async function resolveStaticSize(url) {
     } catch {
         return 0;
     }
+}
+
+async function resolveStaticSize(url, cacheKey = url) {
+    if (imageSizeCache.has(cacheKey)) {
+        return imageSizeCache.get(cacheKey);
+    }
+
+    let size = null;
+    try {
+        // A single HEAD request is the fast path and works for the vast majority
+        // of setups. Only fall back to a range GET when content-length is absent.
+        const head = await apiRequestJson(url, { method: 'HEAD', omitContentType: true });
+        if (head.ok) {
+            const length = Number(head.headers.get('content-length'));
+            if (Number.isFinite(length) && length >= 0) {
+                size = length;
+            }
+        }
+    } catch {
+        // ignore and fall back to the range request
+    }
+
+    if (size === null) {
+        size = await resolveSizeViaRange(url);
+    }
+
+    imageSizeCache.set(cacheKey, size);
+    return size;
 }
 
 function buildImageUrl(folder, filename) {
@@ -282,11 +315,12 @@ async function scanChatImages(root, progressRoot = root) {
         });
         const files = await mapLimit(fileNames, IMAGE_SIZE_CONCURRENCY, async filename => {
             const url = buildImageUrl(folder, filename);
-            const size = await resolveStaticSize(url);
+            const path = imagePath(folder, filename);
+            const size = await resolveStaticSize(url, path);
             return {
                 folder,
                 filename,
-                path: imagePath(folder, filename),
+                path,
                 url,
                 size,
                 protected: /_refs$/i.test(folder),
@@ -869,16 +903,19 @@ async function deleteImagePaths(root, paths) {
         return;
     }
 
+    // Validate the selection against the already-loaded state instead of running
+    // a full rescan. The delete endpoint itself is authoritative: a 404 means the
+    // file is already gone and is treated as success, so stale entries are safe.
+    const knownPaths = new Set((state.images || []).flatMap(folder => folder.files.map(file => file.path)));
+    const filtered = knownPaths.size ? paths.filter(pathId => knownPaths.has(pathId)) : paths;
+    if (!filtered.length) {
+        toastr.info(t`Scan first`);
+        return;
+    }
+
     let shouldRefresh = false;
     setBusy(root, true, t`Delete in progress`);
     try {
-        const fresh = await scanChatImages(root, root);
-        const freshPaths = new Set(fresh.flatMap(folder => folder.files.map(file => file.path)));
-        const filtered = paths.filter(pathId => freshPaths.has(pathId));
-        if (!filtered.length) {
-            toastr.info(t`Scan first`);
-            return;
-        }
         state.progressTotal = filtered.length;
         state.progressDone = 0;
         updateProgress(root, t`Delete in progress`, 0, filtered.length);
@@ -894,6 +931,7 @@ async function deleteImagePaths(root, paths) {
             // 404 means the file is already gone — treat as success.
             if (response.ok || response.status === 404) {
                 deletedCount += 1;
+                invalidateImageSize(pathId);
             } else {
                 failedCount += 1;
                 const text = await response.text().catch(() => '');
@@ -1010,8 +1048,8 @@ async function downloadSelectedImages(root) {
         toastr.warning(t`Scan first`);
         return;
     }
-    const fresh = await scanChatImages(root, root);
-    const map = new Map(fresh.flatMap(folder => folder.files).map(file => [file.path, file]));
+    // Resolve download targets from the already-loaded state; no rescan needed.
+    const map = new Map((state.images || []).flatMap(folder => folder.files).map(file => [file.path, file]));
     const files = paths.map(pathId => map.get(pathId)).filter(Boolean);
     if (!files.length) {
         toastr.warning(t`Scan first`);
@@ -1180,6 +1218,7 @@ async function openCleanupDialog() {
             state.images = null;
             state.dataMaidAvailable = true;
             state.root = null;
+            imageSizeCache.clear();
         },
         onClosing: () => !state.busy,
     });
