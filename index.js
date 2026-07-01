@@ -1,24 +1,30 @@
 'use strict';
 
-import { getContext } from '../../../extensions.js';
 import { callGenericPopup, Popup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 import { humanFileSize } from '../../../utils.js';
 import { t } from '../../../i18n.js';
 
-const _st = await import('../../../script.js').catch(() => ({}));
-const getRequestHeaders = _st.getRequestHeaders ?? window.getRequestHeaders ?? (() => ({}));
-
-const MODULE_NAME = 'Cleaning';
-
-// Concurrency limits. Image scanning is nested: up to IMAGE_SCAN_CONCURRENCY
-// folders are processed in parallel, and within each folder up to
-// IMAGE_SIZE_CONCURRENCY size probes run at once. The effective peak of
-// simultaneous requests is therefore roughly the product of the two, so keep it
-// below typical browser per-host connection limits.
-const IMAGE_SCAN_CONCURRENCY = 4;   // folders scanned in parallel
-const IMAGE_SIZE_CONCURRENCY = 8;   // size probes per folder (~32 peak)
-const DELETE_CONCURRENCY = 8;       // parallel image delete requests
-const DATA_MAID_DELETE_CHUNK = 50;  // hashes per Data Maid delete request
+import {
+    MODULE_NAME,
+    IMAGE_SCAN_CONCURRENCY,
+    IMAGE_SIZE_CONCURRENCY,
+    DELETE_CONCURRENCY,
+    DATA_MAID_DELETE_CHUNK,
+} from './constants.js';
+import { ce, setI18n, makePlainButton, mapLimit } from './dom.js';
+import {
+    apiRequestJson,
+    postJson,
+    resolveStaticSize,
+    invalidateImageSize,
+    clearImageSizeCache,
+    buildImageUrl,
+    imagePath,
+    DataMaidUnavailableError,
+    scanCleanupReport,
+    finalizeToken,
+    isLikelyTokenError,
+} from './api.js';
 
 const state = {
     root: null,
@@ -34,85 +40,6 @@ const state = {
     progressDone: 0,
     progressMessage: '',
 };
-
-function ce(tag, className = '', attrs = {}, children = []) {
-    const el = document.createElement(tag);
-    if (className) {
-        el.className = className;
-    }
-    for (const [key, value] of Object.entries(attrs)) {
-        if (key === 'dataset') {
-            Object.assign(el.dataset, value);
-            continue;
-        }
-        if (key === 'text') {
-            el.textContent = value;
-            continue;
-        }
-        if (key === 'html') {
-            el.innerHTML = value;
-            continue;
-        }
-        if (value === false || value === null || value === undefined) {
-            continue;
-        }
-        if (key === 'classList' && Array.isArray(value)) {
-            el.classList.add(...value);
-            continue;
-        }
-        el.setAttribute(key, String(value));
-    }
-    for (const child of Array.isArray(children) ? children : [children]) {
-        if (child === null || child === undefined) {
-            continue;
-        }
-        el.append(child);
-    }
-    return el;
-}
-
-function setI18n(node, key, title = false) {
-    if (!node) {
-        return node;
-    }
-    node.dataset.i18n = title ? `[title]${key}` : key;
-    return node;
-}
-
-function makeButton(label, icon, className, title = label) {
-    const button = ce('button', `menu_button ${className || ''}`.trim());
-    setI18n(button, title, true);
-    const iconEl = ce('i', icon);
-    const text = ce('span', '', { text: label });
-    setI18n(text, label);
-    button.append(iconEl, text);
-    return button;
-}
-
-function makePlainButton(label, className, title = label, icon = null) {
-    const button = ce('button', `menu_button ${className || ''}`.trim(), { type: 'button' });
-    setI18n(button, title, true);
-    if (icon) {
-        button.append(ce('i', icon), ce('span', '', { text: label }));
-        setI18n(button.lastElementChild, label);
-    } else {
-        button.textContent = label;
-        setI18n(button, label);
-    }
-    return button;
-}
-
-function mapLimit(items, limit, worker) {
-    const results = new Array(items.length);
-    let cursor = 0;
-    const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length || 1)) }, async () => {
-        while (cursor < items.length) {
-            const index = cursor++;
-            results[index] = await worker(items[index], index);
-        }
-    });
-    return Promise.all(workers).then(() => results);
-}
 
 function updateProgress(root, message, done = state.progressDone, total = state.progressTotal) {
     if (!root) {
@@ -192,109 +119,6 @@ function setBusy(root, busy, message = '') {
     updateSummary(root);
 }
 
-async function apiRequestJson(url, options = {}) {
-    const response = await fetch(url, {
-        credentials: 'include',
-        cache: 'no-store',
-        ...options,
-        headers: {
-            ...(options.headers || {}),
-            ...getRequestHeaders(options.omitContentType ? { omitContentType: true } : undefined),
-        },
-    });
-
-    return response;
-}
-
-async function postJson(url, body, options = {}) {
-    const response = await apiRequestJson(url, {
-        method: 'POST',
-        body: JSON.stringify(body),
-        ...options,
-    });
-
-    if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`${url} failed: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`);
-    }
-
-    return response.json();
-}
-
-// Cache of resolved image sizes keyed by relative image path. Image files are
-// immutable once written (SillyTavern always creates new files), so a size that
-// was resolved once stays valid for the lifetime of the dialog. This avoids
-// re-issuing HEAD/range requests on rescans and before delete/download.
-const imageSizeCache = new Map();
-
-function invalidateImageSize(path) {
-    imageSizeCache.delete(path);
-}
-
-// Range-request fallback for servers that don't return content-length on HEAD.
-async function resolveSizeViaRange(url) {
-    try {
-        const ranged = await apiRequestJson(url, {
-            method: 'GET',
-            omitContentType: true,
-            headers: {
-                Range: 'bytes=0-0',
-            },
-        });
-        const contentRange = ranged.headers.get('content-range');
-        if (contentRange) {
-            const match = /\/(\d+)\s*$/.exec(contentRange);
-            if (match) {
-                return Number(match[1]);
-            }
-        }
-        const length = Number(ranged.headers.get('content-length'));
-        if (Number.isFinite(length) && length >= 0 && ranged.status === 206) {
-            return length > 1 ? length : 0;
-        }
-        const buffer = await ranged.arrayBuffer();
-        return buffer.byteLength;
-    } catch {
-        return 0;
-    }
-}
-
-async function resolveStaticSize(url, cacheKey = url) {
-    if (imageSizeCache.has(cacheKey)) {
-        return imageSizeCache.get(cacheKey);
-    }
-
-    let size = null;
-    try {
-        // A single HEAD request is the fast path and works for the vast majority
-        // of setups. Only fall back to a range GET when content-length is absent.
-        const head = await apiRequestJson(url, { method: 'HEAD', omitContentType: true });
-        if (head.ok) {
-            const length = Number(head.headers.get('content-length'));
-            if (Number.isFinite(length) && length >= 0) {
-                size = length;
-            }
-        }
-    } catch {
-        // ignore and fall back to the range request
-    }
-
-    if (size === null) {
-        size = await resolveSizeViaRange(url);
-    }
-
-    imageSizeCache.set(cacheKey, size);
-    return size;
-}
-
-function buildImageUrl(folder, filename) {
-    return `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}`;
-}
-
-function imagePath(folder, filename) {
-    return `user/images/${folder}/${filename}`;
-}
-
 function sortByMtimeThenNameDesc(a, b) {
     return (Number(b.mtime || 0) - Number(a.mtime || 0)) || String(b.name || '').localeCompare(String(a.name || ''));
 }
@@ -340,52 +164,6 @@ async function scanChatImages(root, progressRoot = root) {
 
     folderData.sort((a, b) => String(a.folder).localeCompare(String(b.folder)));
     return folderData;
-}
-
-class DataMaidUnavailableError extends Error {
-    constructor(message) {
-        super(message);
-        this.name = 'DataMaidUnavailableError';
-    }
-}
-
-// HTTP statuses that mean "this SillyTavern build has no Data Maid endpoint"
-// rather than a transient failure worth surfacing as an error.
-const DATA_MAID_MISSING_STATUSES = new Set([404, 501]);
-
-async function scanCleanupReport(root) {
-    let response;
-    try {
-        response = await apiRequestJson('/api/data-maid/report', {
-            method: 'POST',
-            omitContentType: true,
-        });
-    } catch (error) {
-        // Network-level failure (endpoint not reachable) — treat as unavailable.
-        throw new DataMaidUnavailableError(error?.message || 'Data Maid unreachable');
-    }
-
-    if (DATA_MAID_MISSING_STATUSES.has(response.status)) {
-        throw new DataMaidUnavailableError(`Data Maid not available (${response.status})`);
-    }
-
-    if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`Data Maid report failed: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`);
-    }
-
-    return response.json();
-}
-
-async function finalizeToken(token) {
-    if (!token) {
-        return;
-    }
-    try {
-        await postJson('/api/data-maid/finalize', { token });
-    } catch (error) {
-        console.debug('Cleanup finalize ignored:', error);
-    }
 }
 
 function createSectionCard({ key, title, note, buttons = [] }) {
@@ -870,11 +648,6 @@ async function downloadImageFiles(files) {
     }
 }
 
-// HTTP statuses that commonly indicate an invalid/expired Data Maid token.
-function isLikelyTokenError(status) {
-    return status === 400 || status === 401 || status === 403 || status === 409 || status === 419;
-}
-
 // Report the result of a bulk deletion, distinguishing full success, partial
 // success, and total failure so partial failures are never silently swallowed.
 function reportDeletionOutcome(deletedCount, failedCount) {
@@ -958,7 +731,7 @@ async function deleteDataMaidHashes(root, categoryKeys, hashes, confirmText = t`
         return;
     }
 
-    const fresh = await scanCleanupReport(root);
+    const fresh = await scanCleanupReport();
     state.token = fresh.token;
     const report = fresh.report;
     const keyList = Array.isArray(categoryKeys) ? categoryKeys : [categoryKeys];
@@ -1003,7 +776,7 @@ async function deleteDataMaidHashes(root, categoryKeys, hashes, confirmText = t`
             if (!response.ok && isLikelyTokenError(response.status) && !tokenRefreshed) {
                 tokenRefreshed = true;
                 try {
-                    const refreshed = await scanCleanupReport(root);
+                    const refreshed = await scanCleanupReport();
                     state.token = refreshed.token;
                     response = await apiRequestJson('/api/data-maid/delete', {
                         method: 'POST',
@@ -1141,7 +914,7 @@ async function handleScan(root, { silent = false } = {}) {
     // from working (graceful degradation).
     const [imagesResult, reportResult] = await Promise.allSettled([
         scanChatImages(root, root),
-        scanCleanupReport(root),
+        scanCleanupReport(),
     ]);
 
     let imagesFailed = false;
@@ -1218,7 +991,7 @@ async function openCleanupDialog() {
             state.images = null;
             state.dataMaidAvailable = true;
             state.root = null;
-            imageSizeCache.clear();
+            clearImageSizeCache();
         },
         onClosing: () => !state.busy,
     });
