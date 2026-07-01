@@ -1,0 +1,14 @@
+{
+  "display_name": "Cleaning",
+  "version": "1.0.0",
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "fillarr",
+  "description": "Granular, safe disk cleanup for SillyTavern. No server plugin required.",
+  "i18n": {
+    "en": "i18n/en.json",
+    "ru": "i18n/ru.json"
+  }
+}
