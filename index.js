@@ -22,6 +22,7 @@ const state = {
     token: null,
     report: null,
     images: null,
+    dataMaidAvailable: true,
 
     progressTotal: 0,
     progressDone: 0,
@@ -307,11 +308,32 @@ async function scanChatImages(root, progressRoot = root) {
     return folderData;
 }
 
+class DataMaidUnavailableError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'DataMaidUnavailableError';
+    }
+}
+
+// HTTP statuses that mean "this SillyTavern build has no Data Maid endpoint"
+// rather than a transient failure worth surfacing as an error.
+const DATA_MAID_MISSING_STATUSES = new Set([404, 501]);
+
 async function scanCleanupReport(root) {
-    const response = await apiRequestJson('/api/data-maid/report', {
-        method: 'POST',
-        omitContentType: true,
-    });
+    let response;
+    try {
+        response = await apiRequestJson('/api/data-maid/report', {
+            method: 'POST',
+            omitContentType: true,
+        });
+    } catch (error) {
+        // Network-level failure (endpoint not reachable) — treat as unavailable.
+        throw new DataMaidUnavailableError(error?.message || 'Data Maid unreachable');
+    }
+
+    if (DATA_MAID_MISSING_STATUSES.has(response.status)) {
+        throw new DataMaidUnavailableError(`Data Maid not available (${response.status})`);
+    }
 
     if (!response.ok) {
         const text = await response.text().catch(() => '');
@@ -352,6 +374,20 @@ function createSectionCard({ key, title, note, buttons = [] }) {
     }
     header.append(headerButtons);
     section.append(header);
+    return section;
+}
+
+function renderDataMaidUnavailableNotice() {
+    const section = createSectionCard({
+        key: 'dataMaidUnavailable',
+        title: t`Backups & thumbnails`,
+        note: '',
+    });
+    const notice = ce('div', 'cleanupEmpty cleanupNotice', {
+        text: t`Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.`,
+    });
+    setI18n(notice, 'Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.');
+    section.append(notice);
     return section;
 }
 
@@ -800,6 +836,23 @@ async function downloadImageFiles(files) {
     }
 }
 
+// HTTP statuses that commonly indicate an invalid/expired Data Maid token.
+function isLikelyTokenError(status) {
+    return status === 400 || status === 401 || status === 403 || status === 409 || status === 419;
+}
+
+// Report the result of a bulk deletion, distinguishing full success, partial
+// success, and total failure so partial failures are never silently swallowed.
+function reportDeletionOutcome(deletedCount, failedCount) {
+    if (failedCount === 0) {
+        toastr.success(t`Delete complete`);
+    } else if (deletedCount === 0) {
+        toastr.error(t`Deletion failed. No items were removed.`);
+    } else {
+        toastr.warning(t`Deleted ${deletedCount} item(s), ${failedCount} failed.`);
+    }
+}
+
 async function deleteImagePaths(root, paths) {
     if (!paths.length) {
         toastr.info(t`No cleanup job is running.`);
@@ -830,21 +883,28 @@ async function deleteImagePaths(root, paths) {
         state.progressDone = 0;
         updateProgress(root, t`Delete in progress`, 0, filtered.length);
 
+        let deletedCount = 0;
+        let failedCount = 0;
+
         await mapLimit(filtered, DELETE_CONCURRENCY, async pathId => {
             const response = await apiRequestJson('/api/images/delete', {
                 method: 'POST',
                 body: JSON.stringify({ path: pathId }),
             });
-            if (!response.ok && response.status !== 404) {
+            // 404 means the file is already gone — treat as success.
+            if (response.ok || response.status === 404) {
+                deletedCount += 1;
+            } else {
+                failedCount += 1;
                 const text = await response.text().catch(() => '');
-                throw new Error(`Delete failed for ${pathId}: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`);
+                console.error(`Delete failed for ${pathId}: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`);
             }
             state.progressDone += 1;
             updateProgress(root, t`Delete in progress`, state.progressDone, state.progressTotal);
         });
 
-        toastr.success(t`Delete complete`);
-        shouldRefresh = true;
+        reportDeletionOutcome(deletedCount, failedCount);
+        shouldRefresh = deletedCount > 0;
     } finally {
         setBusy(root, false, '');
     }
@@ -890,21 +950,46 @@ async function deleteDataMaidHashes(root, categoryKeys, hashes, confirmText = t`
             chunks.push(selected.slice(index, index + DATA_MAID_DELETE_CHUNK));
         }
 
+        let deletedCount = 0;
+        let failedCount = 0;
+        let tokenRefreshed = false;
+
         for (const chunk of chunks) {
-            const response = await apiRequestJson('/api/data-maid/delete', {
+            let response = await apiRequestJson('/api/data-maid/delete', {
                 method: 'POST',
                 body: JSON.stringify({ token: state.token, hashes: chunk.map(item => item.hash) }),
             });
-            if (!response.ok) {
-                const text = await response.text().catch(() => '');
-                throw new Error(`Data Maid delete failed: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`);
+
+            // A stale/expired token usually surfaces as a 4xx. Refresh the report
+            // once to obtain a fresh token, then retry this chunk a single time.
+            if (!response.ok && isLikelyTokenError(response.status) && !tokenRefreshed) {
+                tokenRefreshed = true;
+                try {
+                    const refreshed = await scanCleanupReport(root);
+                    state.token = refreshed.token;
+                    response = await apiRequestJson('/api/data-maid/delete', {
+                        method: 'POST',
+                        body: JSON.stringify({ token: state.token, hashes: chunk.map(item => item.hash) }),
+                    });
+                } catch (error) {
+                    console.error('Cleanup: token refresh failed:', error);
+                }
             }
+
+            if (response.ok) {
+                deletedCount += chunk.length;
+            } else {
+                failedCount += chunk.length;
+                const text = await response.text().catch(() => '');
+                console.error(`Data Maid delete failed: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`);
+            }
+
             state.progressDone += chunk.length;
             updateProgress(root, t`Delete in progress`, state.progressDone, state.progressTotal);
         }
 
-        toastr.success(t`Delete complete`);
-        shouldRefresh = true;
+        reportDeletionOutcome(deletedCount, failedCount);
+        shouldRefresh = deletedCount > 0;
     } finally {
         setBusy(root, false, '');
     }
@@ -974,20 +1059,27 @@ async function renderAll(root) {
             downloadSelectedImages: () => downloadSelectedImages(root),
             deleteImageGroup: folderData => deleteImageGroup(root, folderData),
         }),
-        buildDataMaidList(root, [...(report.chatBackups || [])].sort(sortByMtimeThenNameDesc), 'chatBackups', t`Chat backups`, '', {
-            deleteSelected: sectionKey => deleteSelectedFromReport(root, sectionKey),
-        }),
-        buildDataMaidList(root, [...(report.settingsBackups || [])].sort(sortByMtimeThenNameDesc).map((item, index) => ({
-            ...item,
-            protected: index === 0,
-            protectedLabel: index === 0 ? t`Newest backup kept` : null,
-        })), 'settingsBackups', t`Settings backups`, t`Settings backups keep the newest file. The newest item is protected.`, {
-            deleteSelected: sectionKey => deleteSelectedFromReport(root, sectionKey),
-        }),
-        renderThumbnailSection(root, report, {
-            deleteSelected: () => deleteSelectedThumbnails(root),
-        }),
     );
+
+    if (state.dataMaidAvailable) {
+        sections.append(
+            buildDataMaidList(root, [...(report.chatBackups || [])].sort(sortByMtimeThenNameDesc), 'chatBackups', t`Chat backups`, '', {
+                deleteSelected: sectionKey => deleteSelectedFromReport(root, sectionKey),
+            }),
+            buildDataMaidList(root, [...(report.settingsBackups || [])].sort(sortByMtimeThenNameDesc).map((item, index) => ({
+                ...item,
+                protected: index === 0,
+                protectedLabel: index === 0 ? t`Newest backup kept` : null,
+            })), 'settingsBackups', t`Settings backups`, t`Settings backups keep the newest file. The newest item is protected.`, {
+                deleteSelected: sectionKey => deleteSelectedFromReport(root, sectionKey),
+            }),
+            renderThumbnailSection(root, report, {
+                deleteSelected: () => deleteSelectedThumbnails(root),
+            }),
+        );
+    } else {
+        sections.append(renderDataMaidUnavailableNotice());
+    }
 
     // Change listeners are attached per-row inside the section renderers
     // (renderImageFolder / buildDataMaidList / renderThumbnailSection), so we
@@ -1005,22 +1097,59 @@ async function handleScan(root, { silent = false } = {}) {
 
     state.scanning = true;
     setBusy(root, true, t`Scanning...`);
+
+    // Images and the Data Maid report are scanned independently so that a
+    // missing or broken Data Maid endpoint never prevents the image section
+    // from working (graceful degradation).
+    const [imagesResult, reportResult] = await Promise.allSettled([
+        scanChatImages(root, root),
+        scanCleanupReport(root),
+    ]);
+
+    let imagesFailed = false;
+    if (imagesResult.status === 'fulfilled') {
+        state.images = imagesResult.value;
+    } else {
+        imagesFailed = true;
+        state.images = [];
+        console.error('Cleanup image scan failed:', imagesResult.reason);
+    }
+
+    let dataMaidMissing = false;
+    if (reportResult.status === 'fulfilled') {
+        state.report = reportResult.value.report;
+        state.token = reportResult.value.token;
+        state.dataMaidAvailable = true;
+    } else if (reportResult.reason instanceof DataMaidUnavailableError) {
+        dataMaidMissing = true;
+        state.report = null;
+        state.token = null;
+        state.dataMaidAvailable = false;
+        console.info('Cleanup: Data Maid is not available, showing chat images only.');
+    } else {
+        state.report = null;
+        state.token = null;
+        state.dataMaidAvailable = true; // real error, keep sections but warn
+        console.error('Cleanup report scan failed:', reportResult.reason);
+    }
+
     try {
-        const [images, report] = await Promise.all([
-            scanChatImages(root, root),
-            scanCleanupReport(root),
-        ]);
-        state.images = images;
-        state.report = report.report;
-        state.token = report.token;
         await renderAll(root);
         updateProgress(root, '', 0, 0);
-        if (!silent) {
+
+        if (imagesFailed && (dataMaidMissing || reportResult.status === 'rejected')) {
+            toastr.error(t`Scan failed`);
+        } else if (imagesFailed) {
+            toastr.error(t`Chat image scan failed.`);
+        } else if (dataMaidMissing) {
+            if (!silent) {
+                toastr.info(t`Data Maid is not available. Showing chat images only.`);
+            }
+        } else if (reportResult.status === 'rejected') {
+            toastr.warning(t`Backups and thumbnails could not be loaded.`);
+        } else if (!silent) {
             toastr.success(t`Scan complete`);
         }
-    } catch (error) {
-        console.error('Cleanup scan failed:', error);
-        toastr.error(error?.message || 'Scan failed');
     } finally {
         state.scanning = false;
         setBusy(root, false, '');
@@ -1049,6 +1178,7 @@ async function openCleanupDialog() {
             state.token = null;
             state.report = null;
             state.images = null;
+            state.dataMaidAvailable = true;
             state.root = null;
         },
         onClosing: () => !state.busy,

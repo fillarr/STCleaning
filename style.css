@@ -211,6 +211,10 @@
     line-height: 1.45;
 }
 
+.cleanupNotice {
+    line-height: 1.5;
+}
+
 .cleanupConfirmHeading {
     font-weight: 600;
 }
