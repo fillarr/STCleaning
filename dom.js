@@ -49,17 +49,6 @@ export function setI18n(node, key, title = false) {
     return node;
 }
 
-/** Build an icon + label `menu_button`. */
-export function makeButton(label, icon, className, title = label) {
-    const button = ce('button', `menu_button ${className || ''}`.trim());
-    setI18n(button, title, true);
-    const iconEl = ce('i', icon);
-    const text = ce('span', '', { text: label });
-    setI18n(text, label);
-    button.append(iconEl, text);
-    return button;
-}
-
 /** Build a plain `menu_button`, optionally with a leading icon. */
 export function makePlainButton(label, className, title = label, icon = null) {
     const button = ce('button', `menu_button ${className || ''}`.trim(), { type: 'button' });

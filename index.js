@@ -84,15 +84,6 @@ function updateSummary(root) {
     }
 }
 
-function getSelectedInputs(root, selector = 'input[data-cleanup-item]:checked:not(:disabled)') {
-    return [...root.querySelectorAll(selector)];
-}
-
-function selectedBytes(root) {
-    return getSelectedInputs(root).reduce((sum, input) => sum + Number(input.dataset.bytes || 0), 0);
-}
-
-
 function getSectionSelectedInputs(root, sectionKey) {
     const section = root.querySelector(`[data-section="${CSS.escape(sectionKey)}"]`);
     return section ? [...section.querySelectorAll('input[data-cleanup-item]:checked:not(:disabled)')] : [];
@@ -238,12 +229,12 @@ function applySectionFilter(section, query) {
     // Collapse folder groups (image section) that have no visible rows.
     for (const folder of section.querySelectorAll('.cleanupFolder')) {
         const anyVisible = [...folder.querySelectorAll('.cleanupItemRow')].some(r => !r.classList.contains('cleanupHidden'));
-        folder.classList.toggle('cleanupHidden', needle && !anyVisible);
+        folder.classList.toggle('cleanupHidden', Boolean(needle) && !anyVisible);
     }
     // Same for thumbnail sub-sections.
     for (const sub of section.querySelectorAll('.cleanupSubSection')) {
         const anyVisible = [...sub.querySelectorAll('.cleanupItemRow')].some(r => !r.classList.contains('cleanupHidden'));
-        sub.classList.toggle('cleanupHidden', needle && !anyVisible);
+        sub.classList.toggle('cleanupHidden', Boolean(needle) && !anyVisible);
     }
 }
 
@@ -273,9 +264,17 @@ function applySectionSort(section, mode) {
     if (!sorter) {
         return;
     }
-    for (const list of section.querySelectorAll('.cleanupItemList')) {
-        const rows = [...list.querySelectorAll('.cleanupItemRow')];
-        const decorated = rows.map(row => ({
+    // Rows may live directly inside a `.cleanupItemList` (image folders) or a
+    // `.cleanupFlatList` (Data Maid lists and thumbnail sub-sections). Reorder
+    // rows within their own parent so each group/sub-section is sorted in place.
+    const lists = new Set();
+    for (const row of section.querySelectorAll('.cleanupItemRow')) {
+        if (row.parentElement) {
+            lists.add(row.parentElement);
+        }
+    }
+    for (const list of lists) {
+        const decorated = [...list.querySelectorAll(':scope > .cleanupItemRow')].map(row => ({
             row,
             name: row.querySelector('.cleanupItemName')?.textContent || '',
             bytes: Number(row.querySelector('input[data-cleanup-item]')?.dataset.bytes || 0),
@@ -337,23 +336,6 @@ function renderCheckboxRow({ id, name, size, disabled = false, checked = false, 
     }
     row.append(label, metaWrap);
     return row;
-}
-
-function renderFlatList(section, items, emptyLabel = t`No items found.`) {
-    const list = ce('div', 'cleanupFlatList');
-    if (!items.length) {
-        list.append(ce('div', 'cleanupEmpty', { text: emptyLabel }));
-        setI18n(list.lastElementChild, emptyLabel);
-        section.append(list);
-        return list;
-    }
-    const itemList = ce('div', 'cleanupItemList');
-    for (const item of items) {
-        itemList.append(renderCheckboxRow(item));
-    }
-    list.append(itemList);
-    section.append(list);
-    return list;
 }
 
 function renderGroupControls({ root, sectionKey, items, disabled = false, deleteHandler, downloadHandler = null, selectLabel = t`Select all in group`, deleteLabel = t`Delete group` }) {
