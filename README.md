@@ -7,10 +7,12 @@ Cleaning gives you a single popup where you can scan, review, and permanently re
 ## ✨ Features
 
 - **Four cleanup sections** in one place — chat images, chat backups, settings backups, and orphan thumbnails.
-- **Per-item sizes** so you can see exactly how much space each file (and each folder) is using before deleting.
+- **Per-item and per-section totals** so you can see exactly how much space each file, folder, and section is using before deleting.
 - **Live selection summary** — the number of selected items and the total space to be freed update as you check boxes.
+- **Filter and sort** within each section — search by name and order by size or name to quickly find the biggest offenders.
 - **Bulk selection** — select all in a section, or all within a single image folder.
 - **Download before deleting** — for chat images, grab a local copy first if you want to keep it.
+- **Graceful degradation** — if Data Maid is unavailable, the chat-image cleanup still works and the other sections show a clear notice instead of failing.
 - **Bilingual UI** — English and Russian (`en` / `ru`).
 
 ## 📦 Install
@@ -40,7 +42,8 @@ To make permanent deletion safe in practice, Cleaning applies several guardrails
 - Folders matching `/_refs$/i` are protected and cannot be selected.
 - The newest settings backup is never selectable.
 - Every destructive action requires an **explicit confirmation** — you must tick an "I understand this is permanent" checkbox before the delete button becomes active.
-- Delete requests are **revalidated against a fresh listing/report** right before execution, so stale selections can't remove the wrong files.
+- Deletions are validated against the current listing, and the delete endpoints stay authoritative: an already-removed file is treated as success rather than an error.
+- Bulk deletions report **partial failures** clearly (deleted N, failed M) instead of stopping on the first error, and an expired Data Maid token is refreshed and retried automatically.
 
 For images, the **Download selected before deleting** action lets you keep a copy first.
 

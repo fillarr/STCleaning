@@ -39,6 +39,28 @@
     flex-wrap: wrap;
 }
 
+.cleanupFilter {
+    flex: 0 1 16rem;
+    min-width: 8rem;
+}
+
+.cleanupFilterInput {
+    width: 100%;
+}
+
+.cleanupSort {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.cleanupSortSelect {
+    width: auto;
+}
+
+.cleanupHidden {
+    display: none !important;
+}
+
 .cleanupSummaryLine {
     display: flex;
     gap: 1.25em;
@@ -89,6 +111,19 @@
 .cleanupSectionHeader h3,
 .cleanupSectionHeader h4 {
     margin: 0;
+}
+
+.cleanupSectionTitleRow {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6em;
+    flex-wrap: wrap;
+}
+
+.cleanupSectionTotals {
+    color: var(--gray-600);
+    font-size: 0.9em;
+    white-space: nowrap;
 }
 
 .cleanupSectionMeta,

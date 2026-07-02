@@ -166,14 +166,21 @@ async function scanChatImages(root, progressRoot = root) {
     return folderData;
 }
 
-function createSectionCard({ key, title, note, buttons = [] }) {
+function createSectionCard({ key, title, note, buttons = [], totals = null }) {
     const section = ce('section', 'cleanupSection', { 'data-section': key });
     const header = ce('div', 'cleanupSectionHeader');
     const titleWrap = ce('div', 'cleanupSectionTitleWrap');
-    titleWrap.append(
-        ce('h3', '', { text: title }),
-    );
-    setI18n(titleWrap.firstElementChild, title);
+    const titleRow = ce('div', 'cleanupSectionTitleRow');
+    const heading = ce('h3', '', { text: title });
+    setI18n(heading, title);
+    titleRow.append(heading);
+    if (totals) {
+        const totalsEl = ce('span', 'cleanupSectionTotals', {
+            text: `${totals.count} • ${humanFileSize(totals.bytes)}`,
+        });
+        titleRow.append(totalsEl);
+    }
+    titleWrap.append(titleRow);
     if (note) {
         const noteEl = ce('div', 'cleanupSectionNote', { text: note });
         setI18n(noteEl, note);
@@ -187,6 +194,14 @@ function createSectionCard({ key, title, note, buttons = [] }) {
     header.append(headerButtons);
     section.append(header);
     return section;
+}
+
+// Compute {count, bytes} totals for a flat item list (files or report entries).
+function sumTotals(items, sizeKey = 'size') {
+    return {
+        count: items.length,
+        bytes: items.reduce((sum, item) => sum + Number(item[sizeKey] || 0), 0),
+    };
 }
 
 function renderDataMaidUnavailableNotice() {
@@ -207,6 +222,89 @@ function createSelectionButton(label, className, actionName) {
     const button = makePlainButton(label, className);
     button.dataset[actionName] = 'true';
     return button;
+}
+
+// Filter visible rows within a section by a case-insensitive substring of the
+// item name. Empty query shows everything. Also toggles empty-result hints and
+// hides folder groups (details) that end up with no visible rows.
+function applySectionFilter(section, query) {
+    const needle = String(query || '').trim().toLowerCase();
+    const rows = section.querySelectorAll('.cleanupItemRow');
+    for (const row of rows) {
+        const name = row.querySelector('.cleanupItemName')?.textContent?.toLowerCase() || '';
+        const match = !needle || name.includes(needle);
+        row.classList.toggle('cleanupHidden', !match);
+    }
+    // Collapse folder groups (image section) that have no visible rows.
+    for (const folder of section.querySelectorAll('.cleanupFolder')) {
+        const anyVisible = [...folder.querySelectorAll('.cleanupItemRow')].some(r => !r.classList.contains('cleanupHidden'));
+        folder.classList.toggle('cleanupHidden', needle && !anyVisible);
+    }
+    // Same for thumbnail sub-sections.
+    for (const sub of section.querySelectorAll('.cleanupSubSection')) {
+        const anyVisible = [...sub.querySelectorAll('.cleanupItemRow')].some(r => !r.classList.contains('cleanupHidden'));
+        sub.classList.toggle('cleanupHidden', needle && !anyVisible);
+    }
+}
+
+function createSectionFilter(section) {
+    const wrap = ce('div', 'cleanupFilter');
+    const input = ce('input', 'text_pole cleanupFilterInput', {
+        type: 'search',
+        placeholder: t`Filter by name...`,
+    });
+    setI18n(input, 'Filter by name...', true);
+    input.addEventListener('input', () => applySectionFilter(section, input.value));
+    wrap.append(input);
+    return wrap;
+}
+
+// Reorder the rows of every item list inside a section without rebuilding them.
+// Sorting operates on the live DOM so it composes with filtering and selection.
+const SECTION_SORTERS = {
+    'name-asc': (a, b) => a.name.localeCompare(b.name),
+    'name-desc': (a, b) => b.name.localeCompare(a.name),
+    'size-desc': (a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name),
+    'size-asc': (a, b) => a.bytes - b.bytes || a.name.localeCompare(b.name),
+};
+
+function applySectionSort(section, mode) {
+    const sorter = SECTION_SORTERS[mode];
+    if (!sorter) {
+        return;
+    }
+    for (const list of section.querySelectorAll('.cleanupItemList')) {
+        const rows = [...list.querySelectorAll('.cleanupItemRow')];
+        const decorated = rows.map(row => ({
+            row,
+            name: row.querySelector('.cleanupItemName')?.textContent || '',
+            bytes: Number(row.querySelector('input[data-cleanup-item]')?.dataset.bytes || 0),
+        }));
+        decorated.sort(sorter);
+        for (const { row } of decorated) {
+            list.append(row);
+        }
+    }
+}
+
+function createSectionSort(section) {
+    const wrap = ce('div', 'cleanupSort');
+    const select = ce('select', 'text_pole cleanupSortSelect');
+    setI18n(select, 'Sort', true);
+    const options = [
+        { value: 'size-desc', label: t`Largest first` },
+        { value: 'size-asc', label: t`Smallest first` },
+        { value: 'name-asc', label: t`Name (A–Z)` },
+        { value: 'name-desc', label: t`Name (Z–A)` },
+    ];
+    for (const opt of options) {
+        const optionEl = ce('option', '', { value: opt.value, text: opt.label });
+        setI18n(optionEl, opt.label);
+        select.append(optionEl);
+    }
+    select.addEventListener('change', () => applySectionSort(section, select.value));
+    wrap.append(select);
+    return wrap;
 }
 
 function renderCheckboxRow({ id, name, size, disabled = false, checked = false, meta = '', badge = null, checkboxTitle = null, extraActions = [] }) {
@@ -355,11 +453,13 @@ function renderImageFolder(root, folderData, handlers) {
 }
 
 function renderImageSection(root, imageGroups, handlers) {
+    const allFiles = imageGroups.flatMap(folder => folder.files);
     const section = createSectionCard({
         key: 'images',
         title: t`Chat images`,
         note: t`Chat images are deleted permanently. There is no trash.`,
         buttons: [],
+        totals: sumTotals(allFiles),
     });
 
     const tools = ce('div', 'cleanupToolbar');
@@ -387,6 +487,8 @@ function renderImageSection(root, imageGroups, handlers) {
     deleteButton.addEventListener('click', async () => handlers.deleteSelectedImages());
     tools.append(deleteButton);
 
+    tools.append(createSectionSort(section));
+    tools.append(createSectionFilter(section));
     section.append(tools);
 
     if (!imageGroups.length) {
@@ -403,7 +505,7 @@ function renderImageSection(root, imageGroups, handlers) {
 }
 
 function buildDataMaidList(root, items, sectionKey, title, note, handlers, options = {}) {
-    const section = createSectionCard({ key: sectionKey, title, note });
+    const section = createSectionCard({ key: sectionKey, title, note, totals: sumTotals(items) });
     const toolbar = ce('div', 'cleanupToolbar');
     const selectAllButton = createSelectionButton(t`Select all in section`, `${sectionKey}SelectAll`, `${sectionKey}SelectAll`);
     setI18n(selectAllButton, t`Select all in section`);
@@ -423,6 +525,8 @@ function buildDataMaidList(root, items, sectionKey, title, note, handlers, optio
     deleteButton.dataset.genericDeleteAction = 'true';
     deleteButton.addEventListener('click', async () => handlers.deleteSelected(sectionKey));
     toolbar.append(deleteButton);
+    toolbar.append(createSectionSort(section));
+    toolbar.append(createSectionFilter(section));
     section.append(toolbar);
 
     if (!items.length) {
@@ -451,11 +555,17 @@ function buildDataMaidList(root, items, sectionKey, title, note, handlers, optio
 }
 
 function renderThumbnailSection(root, report, handlers) {
+    const allThumbs = [
+        ...(report.avatarThumbnails || []),
+        ...(report.backgroundThumbnails || []),
+        ...(report.personaThumbnails || []),
+    ];
     const section = createSectionCard({
         key: 'thumbnails',
         title: t`Orphan thumbnails`,
         note: t`Orphan thumbnails are safe to delete because SillyTavern regenerates them.`,
         buttons: [],
+        totals: sumTotals(allThumbs),
     });
 
     const toolbar = ce('div', 'cleanupToolbar');
@@ -477,6 +587,8 @@ function renderThumbnailSection(root, report, handlers) {
     deleteButton.dataset.genericDeleteAction = 'true';
     deleteButton.addEventListener('click', async () => handlers.deleteSelected());
     toolbar.append(deleteButton);
+    toolbar.append(createSectionSort(section));
+    toolbar.append(createSectionFilter(section));
     section.append(toolbar);
 
     const groups = [
