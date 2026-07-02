@@ -108,6 +108,36 @@
     flex-wrap: wrap;
 }
 
+/* Section cards are <details>: the summary header stays visible and compact,
+   the body (toolbar + lists) is revealed only when the section is expanded. */
+summary.cleanupSectionHeader {
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+}
+
+summary.cleanupSectionHeader::-webkit-details-marker {
+    display: none;
+}
+
+.cleanupSectionChevron {
+    flex: 0 0 auto;
+    font-size: 0.85em;
+    color: var(--gray-600);
+    transition: transform 0.15s ease;
+}
+
+.cleanupSection[open] > summary .cleanupSectionChevron {
+    transform: rotate(90deg);
+}
+
+/* Keep the title glued to the chevron: the title block absorbs free space so
+   space-between doesn't push it to the center of the header. */
+summary.cleanupSectionHeader .cleanupSectionTitleWrap {
+    flex: 1;
+    min-width: 0;
+}
+
 .cleanupSectionHeader h3,
 .cleanupSectionHeader h4 {
     margin: 0;
