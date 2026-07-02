@@ -1099,34 +1099,28 @@ async function openCleanupDialog() {
     });
 }
 
-function settingsHTML() {
-    return `
-<div class="cleaning-settings">
-  <div class="inline-drawer">
-    <div class="inline-drawer-toggle inline-drawer-header">
-      <b><i class="fa-solid fa-broom"></i> ${MODULE_NAME}</b>
-      <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-    </div>
-    <div class="inline-drawer-content">
-      <div class="flex-container flexFlowColumn">
-        <span data-i18n="Chat images are deleted permanently. There is no trash.">${t`Chat images are deleted permanently. There is no trash.`}</span>
-      </div>
-      <div style="margin-top:0.5em">
-        <button id="cleaning-open-btn" class="menu_button menu_button_icon" title="${t`Open Cleanup`}">
-          <i class="fa-solid fa-broom"></i>
-          <span data-i18n="Open Cleanup">${t`Open Cleanup`}</span>
-        </button>
-      </div>
-    </div>
-  </div>
-</div>`;
+/** Build the launcher item for the wand (extensions) menu next to the message input. */
+function buildWandMenuItem() {
+    const item = ce('div', 'list-group-item flex-container flexGap5 interactable', {
+        id: 'cleaning-open-btn',
+        tabindex: '0',
+        title: t`Open Cleanup`,
+    });
+    setI18n(item, 'Open Cleanup', true);
+    const icon = ce('div', 'fa-solid fa-broom extensionsMenuExtensionButton');
+    const label = ce('span', '', { text: t`Open Cleanup` });
+    setI18n(label, 'Open Cleanup');
+    item.append(icon, label);
+    return item;
 }
 
 jQuery(async () => {
-    const $target = $('#extensions_settings2').length
-        ? $('#extensions_settings2')
-        : $('#extensions_settings');
-    $target.append(settingsHTML());
+    const menu = document.getElementById('extensionsMenu');
+    if (menu) {
+        menu.append(buildWandMenuItem());
+    } else {
+        console.error('Cleanup: #extensionsMenu not found, launcher not added.');
+    }
 
     $(document).on('click', '#cleaning-open-btn', function () {
         openCleanupDialog().catch(error => console.error('Cleanup dialog failed:', error));

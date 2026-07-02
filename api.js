@@ -1,7 +1,14 @@
 'use strict';
 
-const _st = await import('../../../script.js').catch(() => ({}));
-const getRequestHeaders = _st.getRequestHeaders ?? window.getRequestHeaders ?? (() => ({}));
+// script.js lives at public/script.js, i.e. four levels up from
+// scripts/extensions/third-party/<name>/ — not three. A wrong path here means
+// getRequestHeaders (and its CSRF token) is silently missing, so every POST
+// request gets rejected with 403 and scans return nothing.
+const _st = await import('../../../../script.js').catch(() => ({}));
+const getRequestHeaders = _st.getRequestHeaders
+    ?? window.SillyTavern?.getContext?.()?.getRequestHeaders
+    ?? window.getRequestHeaders
+    ?? (() => ({}));
 
 /** Low-level fetch wrapper that injects SillyTavern request headers. */
 export async function apiRequestJson(url, options = {}) {
