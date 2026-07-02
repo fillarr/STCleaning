@@ -267,7 +267,10 @@ function createSectionFilter(section) {
 
 // Reorder the rows of every item list inside a section without rebuilding them.
 // Sorting operates on the live DOM so it composes with filtering and selection.
+// Lists are rendered newest-first, so the "newest" mode restores the original
+// DOM order captured before the first reordering.
 const SECTION_SORTERS = {
+    'newest': (a, b) => a.originalIndex - b.originalIndex,
     'name-asc': (a, b) => a.name.localeCompare(b.name),
     'name-desc': (a, b) => b.name.localeCompare(a.name),
     'size-desc': (a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name),
@@ -289,10 +292,19 @@ function applySectionSort(section, mode) {
         }
     }
     for (const list of lists) {
-        const decorated = [...list.querySelectorAll(':scope > .cleanupItemRow')].map(row => ({
+        const rows = [...list.querySelectorAll(':scope > .cleanupItemRow')];
+        // Stamp the initial (newest-first) position once, before any reorder,
+        // so the default "Newest first" mode can restore it later.
+        rows.forEach((row, index) => {
+            if (row.dataset.cleanupOriginalIndex === undefined) {
+                row.dataset.cleanupOriginalIndex = String(index);
+            }
+        });
+        const decorated = rows.map(row => ({
             row,
             name: row.querySelector('.cleanupItemName')?.textContent || '',
             bytes: Number(row.querySelector('input[data-cleanup-item]')?.dataset.bytes || 0),
+            originalIndex: Number(row.dataset.cleanupOriginalIndex || 0),
         }));
         decorated.sort(sorter);
         for (const { row } of decorated) {
@@ -306,6 +318,7 @@ function createSectionSort(section) {
     const select = ce('select', 'text_pole cleanupSortSelect');
     setI18n(select, 'Sort', true);
     const options = [
+        { value: 'newest', label: t`Newest first` },
         { value: 'size-desc', label: t`Largest first` },
         { value: 'size-asc', label: t`Smallest first` },
         { value: 'name-asc', label: t`Name (A–Z)` },
