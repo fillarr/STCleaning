@@ -10,7 +10,10 @@ import {
     IMAGE_SIZE_CONCURRENCY,
     DELETE_CONCURRENCY,
     DATA_MAID_DELETE_CHUNK,
+    ZIP_DOWNLOAD_THRESHOLD,
+    DOWNLOAD_CONCURRENCY,
 } from './constants.js';
+import { buildZipBlob } from './zip.js';
 import { ce, setI18n, makePlainButton, mapLimit } from './dom.js';
 import {
     apiRequestJson,
