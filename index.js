@@ -160,9 +160,14 @@ async function scanChatImages(root, progressRoot = root) {
     return folderData;
 }
 
-function createSectionCard({ key, title, note, buttons = [], totals = null }) {
-    const section = ce('section', 'cleanupSection', { 'data-section': key });
-    const header = ce('div', 'cleanupSectionHeader');
+// Sections are collapsible <details> blocks: the summary shows the category
+// title with total count and size, and the item lists stay hidden until the
+// user expands the section, keeping the dialog compact by default.
+function createSectionCard({ key, title, note, buttons = [], totals = null, open = false }) {
+    const section = ce('details', 'cleanupSection', { 'data-section': key });
+    section.open = open;
+    const header = ce('summary', 'cleanupSectionHeader');
+    header.append(ce('i', 'fa-solid fa-chevron-right cleanupSectionChevron'));
     const titleWrap = ce('div', 'cleanupSectionTitleWrap');
     const titleRow = ce('div', 'cleanupSectionTitleRow');
     const heading = ce('h3', '', { text: title });
@@ -203,6 +208,7 @@ function renderDataMaidUnavailableNotice() {
         key: 'dataMaidUnavailable',
         title: t`Backups & thumbnails`,
         note: '',
+        open: true,
     });
     const notice = ce('div', 'cleanupEmpty cleanupNotice', {
         text: t`Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.`,
@@ -387,7 +393,8 @@ function renderGroupControls({ root, sectionKey, items, disabled = false, delete
 
 function renderImageFolder(root, folderData, handlers) {
     const details = ce('details', 'cleanupFolder');
-    details.open = true;
+    // Folders start collapsed: the summary already shows per-character count
+    // and total size, and files appear only when the folder is expanded.
     const summary = ce('summary', 'cleanupFolderSummary');
     const titleWrap = ce('div', 'cleanupFolderHeader');
     const title = ce('strong', '', { text: folderData.folder });
@@ -504,6 +511,13 @@ function buildDataMaidList(root, items, sectionKey, title, note, handlers, optio
     });
     toolbar.append(selectAllButton);
 
+    if (handlers.downloadSelected) {
+        const downloadButton = createSelectionButton(t`Download selected before deleting`, `${sectionKey}DownloadSelected`, `${sectionKey}DownloadSelected`);
+        setI18n(downloadButton, t`Download selected before deleting`);
+        downloadButton.addEventListener('click', async () => handlers.downloadSelected(sectionKey));
+        toolbar.append(downloadButton);
+    }
+
     const deleteButton = createSelectionButton(t`Delete selected`, `${sectionKey}DeleteSelected`, 'genericDeleteAction');
     setI18n(deleteButton, t`Delete selected`);
     deleteButton.dataset.genericDeleteAction = 'true';
@@ -565,6 +579,13 @@ function renderThumbnailSection(root, report, handlers) {
         updateSummary(root);
     });
     toolbar.append(selectAllButton);
+
+    if (handlers.downloadSelected) {
+        const downloadButton = createSelectionButton(t`Download selected before deleting`, 'cleanupThumbnailsDownloadSelected', 'cleanupThumbnailsDownloadSelected');
+        setI18n(downloadButton, t`Download selected before deleting`);
+        downloadButton.addEventListener('click', async () => handlers.downloadSelected());
+        toolbar.append(downloadButton);
+    }
 
     const deleteButton = createSelectionButton(t`Delete selected`, 'cleanupThumbnailsDeleteSelected', 'genericDeleteAction');
     setI18n(deleteButton, t`Delete selected`);
@@ -736,17 +757,137 @@ async function confirmDestructiveAction(root, count, size, description) {
     return result === POPUP_RESULT.AFFIRMATIVE && ackCheckbox.checked;
 }
 
-async function downloadImageFiles(files) {
-    for (const file of files) {
-        const a = document.createElement('a');
-        a.href = file.url;
-        a.download = file.filename;
-        a.rel = 'noopener';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        await new Promise(resolve => setTimeout(resolve, 40));
+function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Delay revocation so the browser has time to start the download.
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+// Keep archive paths safe: strip characters that are invalid in file names.
+function sanitizeArchivePart(part) {
+    const clean = String(part).replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').trim();
+    return clean || '_';
+}
+
+async function fetchImageData(file) {
+    const response = await apiRequestJson(file.url, { method: 'GET', omitContentType: true });
+    if (!response.ok) {
+        throw new Error(`${response.status} ${response.statusText}`);
     }
+    return new Uint8Array(await response.arrayBuffer());
+}
+
+async function fetchDataMaidData(hash) {
+    const query = `token=${encodeURIComponent(state.token || '')}&hash=${encodeURIComponent(hash)}`;
+    const response = await apiRequestJson(`/api/data-maid/view?${query}`, { method: 'GET', omitContentType: true });
+    if (!response.ok) {
+        throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return new Uint8Array(await response.arrayBuffer());
+}
+
+// Smart download dispatcher. Up to ZIP_DOWNLOAD_THRESHOLD files are saved
+// individually; larger selections are fetched in parallel and packed into a
+// single zip archive whose inner folders mirror the cleanup categories
+// (images/<character folder>/, chat-backups/, settings-backups/, thumbnails/...).
+async function downloadTargets(root, targets) {
+    if (!targets.length) {
+        toastr.warning(t`Scan first`);
+        return;
+    }
+
+    setBusy(root, true, t`Downloading...`);
+    try {
+        let failedCount = 0;
+
+        if (targets.length > ZIP_DOWNLOAD_THRESHOLD) {
+            const entries = [];
+            let done = 0;
+            updateProgress(root, t`Downloading...`, 0, targets.length);
+            await mapLimit(targets, DOWNLOAD_CONCURRENCY, async target => {
+                try {
+                    entries.push({ path: target.archivePath, data: await target.fetchData() });
+                } catch (error) {
+                    failedCount += 1;
+                    console.error(`Download failed for ${target.archivePath}:`, error);
+                }
+                done += 1;
+                updateProgress(root, t`Downloading...`, done, targets.length);
+            });
+
+            if (!entries.length) {
+                toastr.error(t`Download failed`);
+                return;
+            }
+
+            updateProgress(root, t`Packing zip archive...`, targets.length, targets.length);
+            const stamp = new Date().toISOString().slice(0, 10);
+            triggerBlobDownload(buildZipBlob(entries), `st-cleanup-${stamp}.zip`);
+        } else {
+            let done = 0;
+            updateProgress(root, t`Downloading...`, 0, targets.length);
+            for (const target of targets) {
+                try {
+                    const data = await target.fetchData();
+                    triggerBlobDownload(new Blob([data]), target.filename);
+                    // Small gap between saves so browsers don't drop downloads.
+                    await new Promise(resolve => setTimeout(resolve, 150));
+                } catch (error) {
+                    failedCount += 1;
+                    console.error(`Download failed for ${target.archivePath}:`, error);
+                }
+                done += 1;
+                updateProgress(root, t`Downloading...`, done, targets.length);
+            }
+        }
+
+        if (failedCount === 0) {
+            toastr.success(t`Download complete`);
+        } else if (failedCount === targets.length) {
+            toastr.error(t`Download failed`);
+        } else {
+            toastr.warning(t`Some files failed to download.`);
+        }
+    } finally {
+        setBusy(root, false, '');
+        updateProgress(root, '', 0, 0);
+    }
+}
+
+// Archive folder names per Data Maid category, mirroring the dialog sections.
+const DATA_MAID_ARCHIVE_FOLDERS = {
+    chatBackups: 'chat-backups',
+    settingsBackups: 'settings-backups',
+    avatarThumbnails: 'thumbnails/avatars',
+    backgroundThumbnails: 'thumbnails/backgrounds',
+    personaThumbnails: 'thumbnails/personas',
+};
+
+function buildDataMaidTargets(hashes, categoryKeys) {
+    const report = state.report || {};
+    const wanted = new Set(hashes);
+    const targets = [];
+    for (const key of categoryKeys) {
+        const folder = DATA_MAID_ARCHIVE_FOLDERS[key] || key;
+        for (const item of (Array.isArray(report[key]) ? report[key] : [])) {
+            if (!wanted.has(item.hash)) {
+                continue;
+            }
+            targets.push({
+                archivePath: `${folder}/${sanitizeArchivePart(item.name)}`,
+                filename: item.name,
+                fetchData: () => fetchDataMaidData(item.hash),
+            });
+        }
+    }
+    return targets;
 }
 
 // Report the result of a bulk deletion, distinguishing full success, partial
@@ -924,12 +1065,37 @@ async function downloadSelectedImages(root) {
     }
     // Resolve download targets from the already-loaded state; no rescan needed.
     const map = new Map((state.images || []).flatMap(folder => folder.files).map(file => [file.path, file]));
-    const files = paths.map(pathId => map.get(pathId)).filter(Boolean);
-    if (!files.length) {
+    const targets = paths
+        .map(pathId => map.get(pathId))
+        .filter(Boolean)
+        .map(file => ({
+            archivePath: `images/${sanitizeArchivePart(file.folder)}/${sanitizeArchivePart(file.filename)}`,
+            filename: file.filename,
+            fetchData: () => fetchImageData(file),
+        }));
+    if (!targets.length) {
         toastr.warning(t`Scan first`);
         return;
     }
-    await downloadImageFiles(files);
+    await downloadTargets(root, targets);
+}
+
+async function downloadSelectedFromReport(root, sectionKey) {
+    const selected = getSectionSelectedIds(root, sectionKey);
+    if (!selected.length) {
+        toastr.warning(t`Scan first`);
+        return;
+    }
+    await downloadTargets(root, buildDataMaidTargets(selected, [sectionKey]));
+}
+
+async function downloadSelectedThumbnails(root) {
+    const selected = getSectionSelectedIds(root, 'thumbnails');
+    if (!selected.length) {
+        toastr.warning(t`Scan first`);
+        return;
+    }
+    await downloadTargets(root, buildDataMaidTargets(selected, ['avatarThumbnails', 'backgroundThumbnails', 'personaThumbnails']));
 }
 
 async function deleteImageGroup(root, folderData) {
@@ -981,6 +1147,7 @@ async function renderAll(root) {
         sections.append(
             buildDataMaidList(root, [...(report.chatBackups || [])].sort(sortByMtimeThenNameDesc), 'chatBackups', t`Chat backups`, '', {
                 deleteSelected: sectionKey => deleteSelectedFromReport(root, sectionKey),
+                downloadSelected: sectionKey => downloadSelectedFromReport(root, sectionKey),
             }),
             buildDataMaidList(root, [...(report.settingsBackups || [])].sort(sortByMtimeThenNameDesc).map((item, index) => ({
                 ...item,
@@ -988,9 +1155,11 @@ async function renderAll(root) {
                 protectedLabel: index === 0 ? t`Newest backup kept` : null,
             })), 'settingsBackups', t`Settings backups`, t`Settings backups keep the newest file. The newest item is protected.`, {
                 deleteSelected: sectionKey => deleteSelectedFromReport(root, sectionKey),
+                downloadSelected: sectionKey => downloadSelectedFromReport(root, sectionKey),
             }),
             renderThumbnailSection(root, report, {
                 deleteSelected: () => deleteSelectedThumbnails(root),
+                downloadSelected: () => downloadSelectedThumbnails(root),
             }),
         );
     } else {

@@ -54,6 +54,11 @@
   "Deletion failed. No items were removed.": "Удаление не удалось. Ни один элемент не был удалён.",
   "Deleted ${0} item(s), ${1} failed.": "Удалено элементов: ${0}, с ошибкой: ${1}.",
   "Use the scan button to populate the four cleanup sections.": "Нажмите кнопку сканирования, чтобы заполнить четыре раздела.",
+  "Downloading...": "Скачивание...",
+  "Packing zip archive...": "Упаковка zip-архива...",
+  "Download complete": "Скачивание завершено",
+  "Download failed": "Скачивание не удалось",
+  "Some files failed to download.": "Часть файлов скачать не удалось.",
   "Avatar Thumbnails": "Миниатюры аватаров",
   "Background Thumbnails": "Миниатюры фонов",
   "Persona Thumbnails": "Миниатюры персон"
