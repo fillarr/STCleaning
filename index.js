@@ -398,21 +398,9 @@ function renderImageFolder(root, folderData, handlers) {
     details.append(summary);
 
     const body = ce('div', 'cleanupFolderDetails');
-    const items = folderData.files.map(file => ({
-        ...file,
-        checkbox: null,
-    }));
-    const controls = renderGroupControls({
-        root,
-        sectionKey: 'images',
-        items,
-        disabled: folderData.protected,
-        deleteHandler: async () => handlers.deleteImageGroup(folderData),
-        selectLabel: t`Select all in group`,
-        deleteLabel: t`Delete group`,
-    });
-    body.append(controls);
 
+    // Build rows first so each file.checkbox points to the real checkbox node
+    // before we pass the same file objects into renderGroupControls.
     const list = ce('div', 'cleanupItemList');
     for (const file of folderData.files) {
         const row = renderCheckboxRow({
@@ -429,7 +417,19 @@ function renderImageFolder(root, folderData, handlers) {
         checkbox.addEventListener('change', () => updateSummary(root));
         list.append(row);
     }
-    body.append(list);
+
+    // Pass the original file objects (which now own .checkbox) as items.
+    const controls = renderGroupControls({
+        root,
+        sectionKey: 'images',
+        items: folderData.files,
+        disabled: folderData.protected,
+        deleteHandler: async () => handlers.deleteImageGroup(folderData),
+        selectLabel: t`Select all in group`,
+        deleteLabel: t`Delete group`,
+    });
+
+    body.append(controls, list);
     details.append(body);
     return details;
 }
@@ -463,9 +463,8 @@ function renderImageSection(root, imageGroups, handlers) {
     downloadButton.addEventListener('click', async () => handlers.downloadSelectedImages());
     tools.append(downloadButton);
 
-    const deleteButton = createSelectionButton(t`Delete selected`, 'cleanupImagesDeleteSelected', 'data-image-delete-action');
+    const deleteButton = createSelectionButton(t`Delete selected`, 'cleanupImagesDeleteSelected', 'imageDeleteAction');
     setI18n(deleteButton, t`Delete selected`);
-    deleteButton.dataset.imageDeleteAction = 'true';
     deleteButton.addEventListener('click', async () => handlers.deleteSelectedImages());
     tools.append(deleteButton);
 
@@ -672,7 +671,12 @@ function gatherSelectedImagePaths(root) {
 }
 
 function gatherImageGroupPaths(folderData) {
-    return folderData.files.filter(file => !folderData.protected).map(file => file.path);
+    if (folderData.protected) {
+        return [];
+    }
+    return folderData.files
+        .filter(file => file.checkbox?.checked)
+        .map(file => file.path);
 }
 
 async function confirmDestructiveAction(root, count, size, description) {
@@ -927,6 +931,10 @@ async function downloadSelectedImages(root) {
 
 async function deleteImageGroup(root, folderData) {
     const paths = gatherImageGroupPaths(folderData);
+    if (!paths.length) {
+        toastr.info(t`No images selected in this group.`);
+        return;
+    }
     await deleteImagePaths(root, paths);
 }
 

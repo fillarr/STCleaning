@@ -51,26 +51,39 @@ export function clearImageSizeCache() {
 // Range-request fallback for servers that don't return content-length on HEAD.
 async function resolveSizeViaRange(url) {
     try {
+        // Try to get total size from the content-range header.
         const ranged = await apiRequestJson(url, {
             method: 'GET',
             omitContentType: true,
-            headers: {
-                Range: 'bytes=0-0',
-            },
+            headers: { Range: 'bytes=0-0' },
         });
+
         const contentRange = ranged.headers.get('content-range');
         if (contentRange) {
-            const match = /\/(\d+)\s*$/.exec(contentRange);
+            const match = /\/(\d+)\s*$/.exec(contentRange); // ".../<total>"
             if (match) {
                 return Number(match[1]);
             }
         }
-        const length = Number(ranged.headers.get('content-length'));
-        if (Number.isFinite(length) && length >= 0 && ranged.status === 206) {
-            return length > 1 ? length : 0;
+
+        // Server ignored the Range header (200 instead of 206) — content-length is the full size.
+        if (ranged.status === 200) {
+            const length = Number(ranged.headers.get('content-length'));
+            if (Number.isFinite(length) && length >= 0) {
+                return length;
+            }
+            const buffer = await ranged.arrayBuffer();
+            return buffer.byteLength;
         }
-        const buffer = await ranged.arrayBuffer();
-        return buffer.byteLength;
+
+        // Range was honoured (206) but content-range is absent — last resort: full GET.
+        const full = await apiRequestJson(url, { method: 'GET', omitContentType: true });
+        const fullLength = Number(full.headers.get('content-length'));
+        if (Number.isFinite(fullLength) && fullLength >= 0) {
+            return fullLength;
+        }
+        const fullBuffer = await full.arrayBuffer();
+        return fullBuffer.byteLength;
     } catch {
         return 0;
     }
