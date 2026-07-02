@@ -117,6 +117,12 @@ function sortByMtimeThenNameDesc(a, b) {
     return (Number(b.mtime || 0) - Number(a.mtime || 0)) || String(b.name || '').localeCompare(String(a.name || ''));
 }
 
+// Image folders that must never be deleted: reference folders (*_refs) and
+// the "generated" folder with images produced by image generation.
+function isProtectedImageFolder(folder) {
+    return /_refs$/i.test(folder) || /^generated$/i.test(String(folder).trim());
+}
+
 async function scanChatImages(root, progressRoot = root) {
     const folders = await postJson('/api/images/folders', {});
     const sortedFolders = [...folders].sort((a, b) => String(a).localeCompare(String(b)));
@@ -141,13 +147,13 @@ async function scanChatImages(root, progressRoot = root) {
                 path,
                 url,
                 size,
-                protected: /_refs$/i.test(folder),
+                protected: isProtectedImageFolder(folder),
             };
         });
         const totalSize = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
         folderData.push({
             folder,
-            protected: /_refs$/i.test(folder),
+            protected: isProtectedImageFolder(folder),
             files,
             totalSize,
             count: files.length,
@@ -921,8 +927,12 @@ async function deleteImagePaths(root, paths) {
     // Validate the selection against the already-loaded state instead of running
     // a full rescan. The delete endpoint itself is authoritative: a 404 means the
     // file is already gone and is treated as success, so stale entries are safe.
-    const knownPaths = new Set((state.images || []).flatMap(folder => folder.files.map(file => file.path)));
-    const filtered = knownPaths.size ? paths.filter(pathId => knownPaths.has(pathId)) : paths;
+    // Protected folders (e.g. *_refs, "generated") are excluded here as a last
+    // line of defense, even if their checkboxes were somehow selected.
+    const knownPaths = new Set((state.images || [])
+        .filter(folder => !folder.protected)
+        .flatMap(folder => folder.files.filter(file => !file.protected).map(file => file.path)));
+    const filtered = knownPaths.size ? paths.filter(pathId => knownPaths.has(pathId)) : [];
     if (!filtered.length) {
         toastr.info(t`Scan first`);
         return;
