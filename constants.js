@@ -10,7 +10,10 @@ export const MODULE_NAME = 'Cleaning';
 export const IMAGE_SCAN_CONCURRENCY = 4;   // folders scanned in parallel
 export const IMAGE_SIZE_CONCURRENCY = 8;   // size probes per folder (~32 peak)
 export const DELETE_CONCURRENCY = 8;       // parallel image delete requests
-export const DATA_MAID_DELETE_CHUNK = 50;  // hashes per Data Maid delete request
+// Hashes per Data Maid delete request. Progress can only advance once per
+// request, so the chunk is kept small: with multi-gigabyte backup packs a big
+// chunk would leave the progress bar frozen for the whole server round-trip.
+export const DATA_MAID_DELETE_CHUNK = 20;
 
 // Downloads: more than ZIP_DOWNLOAD_THRESHOLD selected files are packed into a
 // single zip archive (organized by category folders) instead of being
