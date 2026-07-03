@@ -113,6 +113,14 @@ function setBusy(root, busy, message = '') {
     updateSummary(root);
 }
 
+// Progress label for long deletions: "Delete in progress 123/456 • 1.2 GB".
+// The live counter and freed-bytes total make it obvious the job is moving
+// even when individual files (large backups, big image packs) take a while.
+function formatDeleteProgress(done, total, freedBytes) {
+    const base = `${t`Delete in progress`} ${done}/${total}`;
+    return freedBytes > 0 ? `${base} • ${humanFileSize(freedBytes)}` : base;
+}
+
 function sortByMtimeThenNameDesc(a, b) {
     return (Number(b.mtime || 0) - Number(a.mtime || 0)) || String(b.name || '').localeCompare(String(a.name || ''));
 }
@@ -951,15 +959,22 @@ async function deleteImagePaths(root, paths) {
         return;
     }
 
+    // Per-file sizes let the progress line report how much space has been
+    // freed so far — important feedback when deleting multi-gigabyte packs.
+    const sizeByPath = new Map((state.images || [])
+        .flatMap(folder => folder.files)
+        .map(file => [file.path, Number(file.size || 0)]));
+
     let shouldRefresh = false;
     setBusy(root, true, t`Delete in progress`);
     try {
         state.progressTotal = filtered.length;
         state.progressDone = 0;
-        updateProgress(root, t`Delete in progress`, 0, filtered.length);
+        updateProgress(root, formatDeleteProgress(0, filtered.length, 0), 0, filtered.length);
 
         let deletedCount = 0;
         let failedCount = 0;
+        let freedBytes = 0;
 
         await mapLimit(filtered, DELETE_CONCURRENCY, async pathId => {
             const response = await apiRequestJson('/api/images/delete', {
@@ -969,6 +984,7 @@ async function deleteImagePaths(root, paths) {
             // 404 means the file is already gone — treat as success.
             if (response.ok || response.status === 404) {
                 deletedCount += 1;
+                freedBytes += sizeByPath.get(pathId) || 0;
                 invalidateImageSize(pathId);
             } else {
                 failedCount += 1;
@@ -976,7 +992,7 @@ async function deleteImagePaths(root, paths) {
                 console.error(`Delete failed for ${pathId}: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`);
             }
             state.progressDone += 1;
-            updateProgress(root, t`Delete in progress`, state.progressDone, state.progressTotal);
+            updateProgress(root, formatDeleteProgress(state.progressDone, state.progressTotal, freedBytes), state.progressDone, state.progressTotal);
         });
 
         reportDeletionOutcome(deletedCount, failedCount);
@@ -1019,7 +1035,7 @@ async function deleteDataMaidHashes(root, categoryKeys, hashes, confirmText = t`
     try {
         state.progressTotal = selected.length;
         state.progressDone = 0;
-        updateProgress(root, t`Delete in progress`, 0, selected.length);
+        updateProgress(root, formatDeleteProgress(0, selected.length, 0), 0, selected.length);
 
         const chunks = [];
         for (let index = 0; index < selected.length; index += DATA_MAID_DELETE_CHUNK) {
@@ -1028,9 +1044,15 @@ async function deleteDataMaidHashes(root, categoryKeys, hashes, confirmText = t`
 
         let deletedCount = 0;
         let failedCount = 0;
+        let freedBytes = 0;
         let tokenRefreshed = false;
 
         for (const chunk of chunks) {
+            // Refresh the label before the request goes out: a chunk of large
+            // backups can take a long time server-side, and the striped
+            // busy animation plus the up-to-date counter show the job is alive.
+            updateProgress(root, formatDeleteProgress(state.progressDone, state.progressTotal, freedBytes), state.progressDone, state.progressTotal);
+
             let response = await apiRequestJson('/api/data-maid/delete', {
                 method: 'POST',
                 body: JSON.stringify({ token: state.token, hashes: chunk.map(item => item.hash) }),
@@ -1054,6 +1076,7 @@ async function deleteDataMaidHashes(root, categoryKeys, hashes, confirmText = t`
 
             if (response.ok) {
                 deletedCount += chunk.length;
+                freedBytes += chunk.reduce((sum, item) => sum + Number(item.size || 0), 0);
             } else {
                 failedCount += chunk.length;
                 const text = await response.text().catch(() => '');
@@ -1061,7 +1084,7 @@ async function deleteDataMaidHashes(root, categoryKeys, hashes, confirmText = t`
             }
 
             state.progressDone += chunk.length;
-            updateProgress(root, t`Delete in progress`, state.progressDone, state.progressTotal);
+            updateProgress(root, formatDeleteProgress(state.progressDone, state.progressTotal, freedBytes), state.progressDone, state.progressTotal);
         }
 
         reportDeletionOutcome(deletedCount, failedCount);

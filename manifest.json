@@ -1,6 +1,6 @@
 {
   "display_name": "Cleaning",
-  "version": "2.2.2",
+  "version": "2.3.0",
   "requires": [],
   "optional": ["data-maid"],
   "js": "index.js",
