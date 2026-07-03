@@ -820,6 +820,14 @@ async function fetchDataMaidData(hash) {
     return new Uint8Array(await response.arrayBuffer());
 }
 
+// Download queue: only one download job runs at a time. Repeat clicks while a
+// job is active are chained instead of running concurrently (parallel jobs
+// would fight over the shared progress bar and browser connection limit), and
+// every state change is announced with a toast so no request looks lost.
+let downloadActive = false;
+let downloadQueuedCount = 0;
+let downloadChain = Promise.resolve();
+
 // Smart download dispatcher. Up to ZIP_DOWNLOAD_THRESHOLD files are saved
 // individually; larger selections are fetched in parallel and packed into a
 // single zip archive whose inner folders mirror the cleanup categories
@@ -830,11 +838,41 @@ async function downloadTargets(root, targets) {
         return;
     }
 
+    const wasQueued = downloadActive;
+    if (wasQueued) {
+        downloadQueuedCount += 1;
+        toastr.info(`${t`Queued for download`} • ${targets.length} ${t`file(s)`} • #${downloadQueuedCount}`, t`Download`);
+    }
+    downloadActive = true;
+
+    downloadChain = downloadChain
+        .then(async () => {
+            if (wasQueued) {
+                downloadQueuedCount -= 1;
+            }
+            await runDownloadJob(root, targets);
+        })
+        .catch(error => console.error('Download job failed:', error))
+        .finally(() => {
+            if (downloadQueuedCount === 0) {
+                downloadActive = false;
+            }
+        });
+    await downloadChain;
+}
+
+async function runDownloadJob(root, targets) {
+    const zipMode = targets.length > ZIP_DOWNLOAD_THRESHOLD;
+    toastr.info(
+        `${targets.length} ${t`file(s)`}${zipMode ? ` • ${t`will be packed into a zip archive`}` : ''}`,
+        t`Download started`,
+    );
+
     setBusy(root, true, t`Downloading...`);
     try {
         let failedCount = 0;
 
-        if (targets.length > ZIP_DOWNLOAD_THRESHOLD) {
+        if (zipMode) {
             const entries = [];
             let done = 0;
             let fetchedBytes = 0;
@@ -866,6 +904,7 @@ async function downloadTargets(root, targets) {
             });
             const stamp = new Date().toISOString().slice(0, 10);
             triggerBlobDownload(blob, `st-cleanup-${stamp}.zip`);
+            toastr.info(`st-cleanup-${stamp}.zip • ${humanFileSize(blob.size)}`, t`Zip archive saved`);
         } else {
             let done = 0;
             updateProgress(root, t`Downloading...`, 0, targets.length);
@@ -885,11 +924,11 @@ async function downloadTargets(root, targets) {
         }
 
         if (failedCount === 0) {
-            toastr.success(t`Download complete`);
+            toastr.success(`${targets.length} ${t`file(s)`}`, t`Download complete`);
         } else if (failedCount === targets.length) {
             toastr.error(t`Download failed`);
         } else {
-            toastr.warning(t`Some files failed to download.`);
+            toastr.warning(`${targets.length - failedCount}/${targets.length} ${t`file(s)`}`, t`Some files failed to download.`);
         }
     } finally {
         setBusy(root, false, '');
