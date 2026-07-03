@@ -232,20 +232,10 @@ function renderDataMaidUnavailableNotice() {
         note: '',
         open: true,
     });
-    // On TauriTavern the generic "not available in this build" text reads like
-    // a bug report waiting to happen; name the platform explicitly so users
-    // know nothing is broken on their side.
-    let text;
-    let i18nKey;
-    if (isTauriTavern()) {
-        text = t`You are running TauriTavern: its Rust backend does not implement the Data Maid API, so chat backups, settings backups, and orphan thumbnails cannot be scanned here. Chat image cleanup works normally.`;
-        i18nKey = 'You are running TauriTavern: its Rust backend does not implement the Data Maid API, so chat backups, settings backups, and orphan thumbnails cannot be scanned here. Chat image cleanup works normally.';
-    } else {
-        text = t`Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.`;
-        i18nKey = 'Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.';
-    }
-    const notice = ce('div', 'cleanupEmpty cleanupNotice', { text });
-    setI18n(notice, i18nKey);
+    const notice = ce('div', 'cleanupEmpty cleanupNotice', {
+        text: t`Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.`,
+    });
+    setI18n(notice, 'Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.');
     section.append(notice);
     return section;
 }
@@ -1281,7 +1271,10 @@ async function renderAll(root) {
                 downloadSelected: () => downloadSelectedThumbnails(root),
             }),
         );
-    } else {
+    } else if (!isTauriTavern()) {
+        // On TauriTavern the Data Maid API is known to be absent by design, so
+        // showing a technical "not available" notice would only worry users.
+        // The backups/thumbnails sections are simply omitted there.
         sections.append(renderDataMaidUnavailableNotice());
     }
 
@@ -1346,8 +1339,12 @@ async function handleScan(root, { silent = false } = {}) {
         } else if (imagesFailed) {
             toastr.error(t`Chat image scan failed.`);
         } else if (dataMaidMissing) {
-            if (!silent) {
+            // On TauriTavern the absence of Data Maid is expected platform
+            // behavior, not something users need to be told about every scan.
+            if (!silent && !isTauriTavern()) {
                 toastr.info(t`Data Maid is not available. Showing chat images only.`);
+            } else if (!silent) {
+                toastr.success(t`Scan complete`);
             }
         } else if (reportResult.status === 'rejected') {
             toastr.warning(t`Backups and thumbnails could not be loaded.`);

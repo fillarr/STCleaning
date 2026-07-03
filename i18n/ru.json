@@ -53,7 +53,6 @@
   "Data Maid is not available. Showing chat images only.": "Data Maid недоступен. Показаны только картинки чата.",
   "Backups & thumbnails": "Резервные копии и миниатюры",
   "Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.": "В этой сборке SillyTavern недоступен Data Maid, поэтому резервные копии чатов и настроек, а также осиротевшие миниатюры просканировать нельзя. Очистка картинок чата по-прежнему работает.",
-  "You are running TauriTavern: its Rust backend does not implement the Data Maid API, so chat backups, settings backups, and orphan thumbnails cannot be scanned here. Chat image cleanup works normally.": "Вы используете TauriTavern: его Rust-бэкенд не реализует API Data Maid, поэтому резервные копии чатов и настроек, а также осиротевшие миниатюры здесь просканировать невозможно. Очистка картинок чата работает как обычно.",
   "Deletion failed. No items were removed.": "Удаление не удалось. Ни один элемент не был удалён.",
   "Deleted ${0} item(s), ${1} failed.": "Удалено элементов: ${0}, с ошибкой: ${1}.",
   "Use the scan button to populate the four cleanup sections.": "Нажмите кнопку сканирования, чтобы заполнить четыре раздела.",
