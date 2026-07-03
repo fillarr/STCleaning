@@ -217,6 +217,14 @@ function sumTotals(items, sizeKey = 'size') {
     };
 }
 
+// TauriTavern (Tauri v2 + Rust backend) replaces the Node server with fetch
+// interceptors and exposes a stable platform ABI on window.__TAURITAVERN__.
+// Its route registry has no data-maid routes, so the Data Maid API that backs
+// the backups/thumbnails sections does not exist on that platform at all.
+function isTauriTavern() {
+    return typeof window !== 'undefined' && Boolean(window.__TAURITAVERN__);
+}
+
 function renderDataMaidUnavailableNotice() {
     const section = createSectionCard({
         key: 'dataMaidUnavailable',
@@ -1263,7 +1271,10 @@ async function renderAll(root) {
                 downloadSelected: () => downloadSelectedThumbnails(root),
             }),
         );
-    } else {
+    } else if (!isTauriTavern()) {
+        // On TauriTavern the Data Maid API is known to be absent by design, so
+        // showing a technical "not available" notice would only worry users.
+        // The backups/thumbnails sections are simply omitted there.
         sections.append(renderDataMaidUnavailableNotice());
     }
 
@@ -1328,8 +1339,12 @@ async function handleScan(root, { silent = false } = {}) {
         } else if (imagesFailed) {
             toastr.error(t`Chat image scan failed.`);
         } else if (dataMaidMissing) {
-            if (!silent) {
+            // On TauriTavern the absence of Data Maid is expected platform
+            // behavior, not something users need to be told about every scan.
+            if (!silent && !isTauriTavern()) {
                 toastr.info(t`Data Maid is not available. Showing chat images only.`);
+            } else if (!silent) {
+                toastr.success(t`Scan complete`);
             }
         } else if (reportResult.status === 'rejected') {
             toastr.warning(t`Backups and thumbnails could not be loaded.`);
