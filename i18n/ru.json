@@ -38,6 +38,7 @@
   "Scan first": "Сначала выполните сканирование",
   "Refreshing...": "Обновление...",
   "Delete in progress": "Идёт удаление",
+  "Preparing deletion...": "Подготовка к удалению...",
   "Orphan thumbnails are safe to delete because SillyTavern regenerates them.": "Осиротевшие миниатюры безопасно удалять: SillyTavern создаёт их заново.",
   "Settings backups keep the newest file. The newest item is protected.": "Среди резервных копий настроек всегда сохраняется самый новый файл. Он защищён от удаления.",
   "Chat images are deleted permanently. There is no trash.": "Картинки чата удаляются безвозвратно. Корзины нет.",
