@@ -935,10 +935,13 @@ async function deleteImagePaths(root, paths) {
         return;
     }
 
-    const totalBytes = paths.reduce((sum, pathId) => {
-        const input = root.querySelector(`input[data-cleanup-id="${CSS.escape(pathId)}"]`);
-        return sum + Number(input?.dataset.bytes || 0);
-    }, 0);
+    // Build the size lookup once from the in-memory scan state. Summing sizes
+    // via per-path DOM queries was O(n²) over the whole dialog and froze the
+    // UI for seconds before the confirmation popup with large selections.
+    const sizeByPath = new Map((state.images || [])
+        .flatMap(folder => folder.files)
+        .map(file => [file.path, Number(file.size || 0)]));
+    const totalBytes = paths.reduce((sum, pathId) => sum + (sizeByPath.get(pathId) || 0), 0);
 
     const ok = await confirmDestructiveAction(root, paths.length, humanFileSize(totalBytes), t`Delete selected chat images?`);
     if (!ok) {
@@ -958,12 +961,6 @@ async function deleteImagePaths(root, paths) {
         toastr.info(t`Scan first`);
         return;
     }
-
-    // Per-file sizes let the progress line report how much space has been
-    // freed so far — important feedback when deleting multi-gigabyte packs.
-    const sizeByPath = new Map((state.images || [])
-        .flatMap(folder => folder.files)
-        .map(file => [file.path, Number(file.size || 0)]));
 
     let shouldRefresh = false;
     setBusy(root, true, t`Delete in progress`);
@@ -1012,7 +1009,17 @@ async function deleteDataMaidHashes(root, categoryKeys, hashes, confirmText = t`
         return;
     }
 
-    const fresh = await scanCleanupReport();
+    // The pre-delete token refresh runs a full server-side scan, which can take
+    // a while with large data folders. Show the busy progress bar during it so
+    // the pause before the confirmation popup doesn't look like a freeze.
+    let fresh;
+    setBusy(root, true, t`Preparing deletion...`);
+    try {
+        fresh = await scanCleanupReport();
+    } finally {
+        setBusy(root, false, '');
+        updateProgress(root, '', 0, 0);
+    }
     state.token = fresh.token;
     const report = fresh.report;
     const keyList = Array.isArray(categoryKeys) ? categoryKeys : [categoryKeys];
