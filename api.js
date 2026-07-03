@@ -146,6 +146,14 @@ const DATA_MAID_MISSING_STATUSES = new Set([404, 501]);
 
 /** Fetch the Data Maid report, throwing DataMaidUnavailableError when absent. */
 export async function scanCleanupReport() {
+    // TauriTavern (Tauri v2 + Rust backend) intercepts API fetches with its own
+    // route registry, which has no data-maid routes — the endpoint does not
+    // exist on that platform. Short-circuit instead of firing a request that
+    // may fall through to the webview and return misleading non-JSON content.
+    if (typeof window !== 'undefined' && window.__TAURITAVERN__) {
+        throw new DataMaidUnavailableError('Data Maid is not implemented by the TauriTavern backend');
+    }
+
     let response;
     try {
         response = await apiRequestJson('/api/data-maid/report', {
@@ -166,7 +174,13 @@ export async function scanCleanupReport() {
         throw new Error(`Data Maid report failed: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`);
     }
 
-    return response.json();
+    // A 200 response that isn't JSON (e.g. an HTML fallback page served by a
+    // build without the endpoint) also means Data Maid is absent, not broken.
+    try {
+        return await response.json();
+    } catch {
+        throw new DataMaidUnavailableError('Data Maid endpoint returned a non-JSON response');
+    }
 }
 
 /** Best-effort release of a Data Maid token; failures are ignored. */

@@ -217,6 +217,14 @@ function sumTotals(items, sizeKey = 'size') {
     };
 }
 
+// TauriTavern (Tauri v2 + Rust backend) replaces the Node server with fetch
+// interceptors and exposes a stable platform ABI on window.__TAURITAVERN__.
+// Its route registry has no data-maid routes, so the Data Maid API that backs
+// the backups/thumbnails sections does not exist on that platform at all.
+function isTauriTavern() {
+    return typeof window !== 'undefined' && Boolean(window.__TAURITAVERN__);
+}
+
 function renderDataMaidUnavailableNotice() {
     const section = createSectionCard({
         key: 'dataMaidUnavailable',
@@ -224,10 +232,20 @@ function renderDataMaidUnavailableNotice() {
         note: '',
         open: true,
     });
-    const notice = ce('div', 'cleanupEmpty cleanupNotice', {
-        text: t`Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.`,
-    });
-    setI18n(notice, 'Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.');
+    // On TauriTavern the generic "not available in this build" text reads like
+    // a bug report waiting to happen; name the platform explicitly so users
+    // know nothing is broken on their side.
+    let text;
+    let i18nKey;
+    if (isTauriTavern()) {
+        text = t`You are running TauriTavern: its Rust backend does not implement the Data Maid API, so chat backups, settings backups, and orphan thumbnails cannot be scanned here. Chat image cleanup works normally.`;
+        i18nKey = 'You are running TauriTavern: its Rust backend does not implement the Data Maid API, so chat backups, settings backups, and orphan thumbnails cannot be scanned here. Chat image cleanup works normally.';
+    } else {
+        text = t`Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.`;
+        i18nKey = 'Data Maid is not available in this SillyTavern build, so chat backups, settings backups, and orphan thumbnails cannot be scanned. Chat image cleanup still works.';
+    }
+    const notice = ce('div', 'cleanupEmpty cleanupNotice', { text });
+    setI18n(notice, i18nKey);
     section.append(notice);
     return section;
 }
