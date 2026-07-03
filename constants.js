@@ -19,4 +19,6 @@ export const DATA_MAID_DELETE_CHUNK = 20;
 // single zip archive (organized by category folders) instead of being
 // downloaded one by one.
 export const ZIP_DOWNLOAD_THRESHOLD = 5;
-export const DOWNLOAD_CONCURRENCY = 4;      // parallel file fetches while zipping
+// Parallel file fetches while zipping. 6 noticeably speeds up large packs and
+// still stays within the typical per-host connection limit of 6 in browsers.
+export const DOWNLOAD_CONCURRENCY = 6;

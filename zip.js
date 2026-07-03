@@ -17,10 +17,28 @@ const CRC_TABLE = (() => {
     return table;
 })();
 
-function crc32(bytes) {
-    let crc = 0xFFFFFFFF;
-    for (let i = 0; i < bytes.length; i++) {
+// CRC over a slice, resumable: pass the previous raw state to continue.
+function crc32Chunk(bytes, start, end, state) {
+    let crc = state;
+    for (let i = start; i < end; i++) {
         crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    }
+    return crc;
+}
+
+// CRC32 is the only CPU-heavy part of packing. Computing it synchronously
+// over multi-gigabyte selections froze the UI (and the progress bar) for
+// seconds. This version processes data in slices and yields to the event
+// loop between them so rendering, animations, and progress updates keep going.
+const CRC_YIELD_SLICE = 8 * 1024 * 1024; // 8 MB per slice between yields
+
+async function crc32Async(bytes) {
+    let crc = 0xFFFFFFFF;
+    for (let start = 0; start < bytes.length; start += CRC_YIELD_SLICE) {
+        crc = crc32Chunk(bytes, start, Math.min(start + CRC_YIELD_SLICE, bytes.length), crc);
+        if (start + CRC_YIELD_SLICE < bytes.length) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
     }
     return (crc ^ 0xFFFFFFFF) >>> 0;
 }
@@ -51,24 +69,28 @@ function uniquePath(path, usedPaths) {
 }
 
 /**
- * Build a ZIP archive Blob from entries.
+ * Build a ZIP archive Blob from entries without blocking the UI thread.
+ * CRC work is sliced with event-loop yields, and `onProgress(done, total)`
+ * fires after each entry so the caller can drive a live progress bar.
  * @param {{path: string, data: Uint8Array}[]} entries Archive entries; `path` may contain forward slashes for folders.
- * @returns {Blob} The assembled zip file.
+ * @param {(done: number, total: number) => void} [onProgress] Called after each packed entry.
+ * @returns {Promise<Blob>} The assembled zip file.
  */
-export function buildZipBlob(entries) {
+export async function buildZipBlob(entries, onProgress) {
     const encoder = new TextEncoder();
     const { time, day } = dosDateTime();
     const localParts = [];
     const centralParts = [];
     const usedPaths = new Set();
     let offset = 0;
+    let done = 0;
 
     for (const entry of entries) {
         const cleanPath = uniquePath(String(entry.path).replace(/\\/g, '/').replace(/^\/+/, ''), usedPaths);
         usedPaths.add(cleanPath);
         const nameBytes = encoder.encode(cleanPath);
         const data = entry.data;
-        const crc = crc32(data);
+        const crc = await crc32Async(data);
 
         const local = new DataView(new ArrayBuffer(30));
         local.setUint32(0, 0x04034B50, true);      // local file header signature
@@ -101,6 +123,8 @@ export function buildZipBlob(entries) {
         centralParts.push(new Uint8Array(central.buffer), nameBytes);
 
         offset += 30 + nameBytes.length + data.length;
+        done += 1;
+        onProgress?.(done, entries.length);
     }
 
     const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);

@@ -837,16 +837,19 @@ async function downloadTargets(root, targets) {
         if (targets.length > ZIP_DOWNLOAD_THRESHOLD) {
             const entries = [];
             let done = 0;
-            updateProgress(root, t`Downloading...`, 0, targets.length);
+            let fetchedBytes = 0;
+            updateProgress(root, `${t`Downloading...`} 0/${targets.length}`, 0, targets.length);
             await mapLimit(targets, DOWNLOAD_CONCURRENCY, async target => {
                 try {
-                    entries.push({ path: target.archivePath, data: await target.fetchData() });
+                    const data = await target.fetchData();
+                    fetchedBytes += data.length;
+                    entries.push({ path: target.archivePath, data });
                 } catch (error) {
                     failedCount += 1;
                     console.error(`Download failed for ${target.archivePath}:`, error);
                 }
                 done += 1;
-                updateProgress(root, t`Downloading...`, done, targets.length);
+                updateProgress(root, `${t`Downloading...`} ${done}/${targets.length} • ${humanFileSize(fetchedBytes)}`, done, targets.length);
             });
 
             if (!entries.length) {
@@ -854,9 +857,15 @@ async function downloadTargets(root, targets) {
                 return;
             }
 
-            updateProgress(root, t`Packing zip archive...`, targets.length, targets.length);
+            // Packing restarts the bar as a second phase with its own counter;
+            // buildZipBlob yields to the event loop while hashing, so the UI
+            // and the striped busy animation stay live even on huge archives.
+            updateProgress(root, `${t`Packing zip archive...`} 0/${entries.length}`, 0, entries.length);
+            const blob = await buildZipBlob(entries, (packed, total) => {
+                updateProgress(root, `${t`Packing zip archive...`} ${packed}/${total}`, packed, total);
+            });
             const stamp = new Date().toISOString().slice(0, 10);
-            triggerBlobDownload(buildZipBlob(entries), `st-cleanup-${stamp}.zip`);
+            triggerBlobDownload(blob, `st-cleanup-${stamp}.zip`);
         } else {
             let done = 0;
             updateProgress(root, t`Downloading...`, 0, targets.length);
